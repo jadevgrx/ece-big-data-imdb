@@ -47,6 +47,18 @@ services:
     depends_on:
       - kafka
 
+  # Wikipedia -> Kafka producer. It only starts when called explicitly:
+  # docker compose run --rm producer --minutes 30
+  producer:
+    build: ./producer
+    container_name: wiki_producer
+    profiles:
+      - streaming
+    networks:
+      - kafka-spark-net
+    depends_on:
+      - kafka
+
 networks:
   kafka-spark-net:
     driver: bridge
