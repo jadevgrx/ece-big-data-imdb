@@ -225,10 +225,13 @@ def wait_for_first_commit(path, timeout=300):
 
 
 def save_progress(spark, metrics_file, last_saved):
-    """Append every new batch progress of the active queries to a file.
+    """Append every new progress event of the active queries to a file.
 
-    recentProgress keeps the last batches of each query, so no batch is
-    missed between two reports. last_saved maps query name to batch id.
+    recentProgress keeps the last events of each query, so none is missed
+    between two reports. Spark also emits "idle" events while no data
+    arrives, which reuse the id of the next batch, so events are told apart
+    by their timestamp, not by their batch id. last_saved maps a query name
+    to the timestamp of the last event written.
     """
     with open(metrics_file, "a", encoding="utf-8") as out:
         for query in spark.streams.active:
@@ -236,26 +239,29 @@ def save_progress(spark, metrics_file, last_saved):
                 # Spark 4 returns progress objects, older versions dicts.
                 progress = (json.loads(item.json) if hasattr(item, "json")
                             else item)
-                batch_id = progress["batchId"]
-                if batch_id <= last_saved.get(query.name, -1):
+                stamp = progress["timestamp"]
+                if stamp <= last_saved.get(query.name, ""):
                     continue
                 out.write(json.dumps(progress) + "\n")
-                last_saved[query.name] = batch_id
+                last_saved[query.name] = stamp
+                rows = progress.get("numInputRows", 0)
                 dropped = sum(
                     op.get("numRowsDroppedByWatermark", 0)
                     for op in progress.get("stateOperators", [])
                 )
-                print(f"[{query.name}] batch={batch_id} "
-                      f"input={progress.get('numInputRows', 0)} "
-                      f"processed/s="
-                      f"{progress.get('processedRowsPerSecond', 0.0):.1f} "
-                      f"late_dropped={dropped}")
+                if rows or dropped:
+                    print(f"[{query.name}] batch={progress['batchId']} "
+                          f"input={rows} processed/s="
+                          f"{progress.get('processedRowsPerSecond', 0.0):.1f}"
+                          f" late_dropped={dropped}")
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-dir", default="/home/jovyan/data")
+    parser.add_argument("--output-dir",
+                        help="Output folder (default: DATA_DIR/streaming)")
     parser.add_argument("--bootstrap-servers", default="kafka:19092")
     parser.add_argument("--topic", default="wikistreams")
     parser.add_argument("--starting-offsets", default="latest",
@@ -274,7 +280,8 @@ def main():
     args = parse_args()
     data_dir = Path(args.data_dir)
     lookup_dir = data_dir / "imdb" / "wiki_lookup"
-    out_dir = data_dir / "streaming"
+    out_dir = (Path(args.output_dir) if args.output_dir
+               else data_dir / "streaming")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     spark = (

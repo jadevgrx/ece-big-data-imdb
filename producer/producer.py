@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import time
+from collections import deque
 
 import requests
 from confluent_kafka import KafkaException, Producer
@@ -30,6 +31,10 @@ DEFAULT_WIKIS = ["enwiki", "frwiki", "dewiki", "eswiki", "itwiki"]
 KEPT_TYPES = {"edit", "new"}
 ARTICLE_NAMESPACE = 0
 LOG_EVERY = 500
+# Number of recent event ids remembered to drop duplicates. Resuming with
+# Last-Event-ID after a reconnect can send again a few events already
+# received, never thousands, so a bounded memory is enough.
+DEDUP_WINDOW = 50000
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +94,24 @@ def is_relevant(change, wikis):
     )
 
 
+class RecentIds:
+    """Remember the last event ids seen, with a bounded memory."""
+
+    def __init__(self, size):
+        self.order = deque(maxlen=size)
+        self.ids = set()
+
+    def seen(self, event_id):
+        """Return True if event_id was already seen, else remember it."""
+        if event_id in self.ids:
+            return True
+        if len(self.order) == self.order.maxlen:
+            self.ids.discard(self.order[0])
+        self.order.append(event_id)
+        self.ids.add(event_id)
+        return False
+
+
 def publish(producer, topic, change, raw):
     """Send one event to Kafka, keyed by page title."""
     key = change.get("title", "").encode("utf-8")
@@ -137,7 +160,8 @@ def main():
     session.headers["User-Agent"] = USER_AGENT
 
     stop_at = time.time() + args.minutes * 60 if args.minutes > 0 else None
-    received = kept = 0
+    received = kept = duplicates = 0
+    recent = RecentIds(DEDUP_WINDOW)
     last_event_id = None
     backoff = 1
     log.info("Streaming %s into topic %s", sorted(wikis), args.topic)
@@ -152,11 +176,16 @@ def main():
                     change = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+                meta_id = (change.get("meta") or {}).get("id")
+                if meta_id and recent.seen(meta_id):
+                    duplicates += 1
+                    continue
                 if is_relevant(change, wikis):
                     publish(producer, args.topic, change, raw)
                     kept += 1
                 if received % LOG_EVERY == 0:
-                    log.info("received=%d kept=%d", received, kept)
+                    log.info("received=%d kept=%d duplicates=%d",
+                             received, kept, duplicates)
                 if stop_at is not None and time.time() >= stop_at:
                     break
         except (requests.RequestException, KafkaException) as error:
@@ -167,7 +196,8 @@ def main():
             backoff = min(backoff * 2, 60)
 
     producer.flush(30)
-    log.info("Done: received=%d kept=%d", received, kept)
+    log.info("Done: received=%d kept=%d duplicates=%d",
+             received, kept, duplicates)
 
 
 if __name__ == "__main__":
