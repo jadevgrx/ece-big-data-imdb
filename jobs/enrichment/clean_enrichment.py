@@ -6,11 +6,17 @@ section when there is none), cleans the biographies, adds a note whenever
 information is missing, and joins everything back to the selection made by
 select_films.py. Every output row keeps its source URL for lineage.
 
+Texts are stored once per film (film_texts) and once per person
+(people_texts). The selection tables (films_enriched, principals_enriched)
+carry the synopsis type, source URL and note, and are joined to the texts
+on tconst / nconst only when the text itself is needed.
+
 Usage (inside the pyspark_notebook container, from /home/jovyan):
     spark-submit --driver-memory 4g jobs/enrichment/clean_enrichment.py
 """
 
 import argparse
+import os
 
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
@@ -18,7 +24,10 @@ from pyspark.sql.types import (ArrayType, StringType, StructField,
                                StructType)
 
 # Level-2 headings that hold a film's story on English Wikipedia.
-PLOT_HEADINGS = "Plot|Plot summary|Synopsis|Summary|Premise|Story|Storyline"
+PLOT_HEADINGS = "|".join([
+    "Plot", "Plot summary", "Plot synopsis", "Plot overview", "Plot outline",
+    "Synopsis", "Summary", "Premise", "Story", "Storyline",
+])
 PLOT_PATTERN = (
     rf"(?s)\n== (?:{PLOT_HEADINGS}) ==\n(.*?)(?=\n== [^=]|\Z)"
 )
@@ -47,8 +56,16 @@ def raw_schema(key):
 
 
 def read_raw(spark, path, key):
-    """Read scraped records and keep the latest one per ID."""
-    df = spark.read.schema(raw_schema(key)).json(path)
+    """Read scraped records and keep the latest one per ID.
+
+    A missing file (phase not run yet) gives an empty table, so the job
+    can run on films only or on people only.
+    """
+    if not os.path.exists(path):
+        print(f"{path} not found: treated as empty")
+        df = spark.createDataFrame([], raw_schema(key))
+    else:
+        df = spark.read.schema(raw_schema(key)).json(path)
     latest = Window.partitionBy(key).orderBy(F.col("retrieved_at").desc())
     return (
         df.withColumn("rn", F.row_number().over(latest))
@@ -156,12 +173,25 @@ def main():
     people = clean_people(
         read_raw(spark, f"{args.raw_dir}/people_raw.jsonl", "nconst"))
 
+    # Texts once per ID.
+    films.write.mode("overwrite").parquet(f"{args.out_dir}/film_texts")
+    people.write.mode("overwrite").parquet(f"{args.out_dir}/people_texts")
+
+    # Selection rows with lineage and notes, without the long texts.
     enriched_films = with_missing_note(
-        films_top.join(films, on="tconst", how="left"),
+        films_top.join(
+            films.select("tconst", "synopsis_type", "original_languages",
+                         "source_url", "retrieved_at", "note"),
+            on="tconst", how="left"),
         "retrieved_at", "Not scraped yet",
-    )
+    ).withColumn("synopsis_type",
+                 F.coalesce("synopsis_type", F.lit("not_scraped")))
     enriched_people = with_missing_note(
-        principals_top.join(people, on="nconst", how="left"),
+        principals_top.join(
+            people.select(
+                "nconst", "source_url", "retrieved_at", "note",
+                F.col("biography").isNotNull().alias("has_biography")),
+            on="nconst", how="left"),
         "retrieved_at", "Not scraped yet",
     )
 
