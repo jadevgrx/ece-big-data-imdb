@@ -94,13 +94,30 @@ def load_ids(pattern, column):
 
 
 def load_jsonl(path):
+    """Read a JSONL file, skipping a line cut by an interrupted run."""
     if not os.path.exists(path):
         return []
+    records = []
     with open(path, encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+        for number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"  skipping unreadable line {number} of {path}")
+    return records
 
 
 def append_jsonl(path, records):
+    # If a previous run was killed mid-line, start on a fresh line.
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        with open(path, "rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            missing_newline = handle.read(1) != b"\n"
+        if missing_newline:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("\n")
     with open(path, "a", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -196,23 +213,30 @@ def phase_texts(client, mapping, ids, out_path, key, intro_only, batch_size):
 
     no_article = []
     with_article = []
+    not_mapped = 0
     for imdb_id in todo:
         entry = mapping.get(imdb_id)
-        if entry and entry["article_url"]:
+        if entry is None:
+            # Not mapped yet (map phase unfinished or crashed): leave it
+            # out so that the next run picks it up.
+            not_mapped += 1
+        elif entry["article_url"]:
             with_article.append(imdb_id)
         else:
             no_article.append({
                 key: imdb_id,
-                "wikidata_uri": entry["wikidata_uri"] if entry else None,
+                "wikidata_uri": entry["wikidata_uri"],
                 "wikipedia_title": None,
                 "text": None,
-                "original_languages": entry["original_languages"]
-                if entry else [],
-                "status": entry["status"] if entry and
-                entry["status"] != "ok" else "no_enwiki_article",
-                "source_url": entry["source_url"] if entry else SPARQL_URL,
+                "original_languages": entry["original_languages"],
+                "status": entry["status"] if entry["status"] != "ok"
+                else "no_enwiki_article",
+                "source_url": entry["source_url"],
                 "retrieved_at": now(),
             })
+    if not_mapped:
+        print(f"[{key}] {not_mapped} IDs skipped: not in the Wikidata "
+              f"mapping yet, run the map phase first")
     append_jsonl(out_path, no_article)
 
     for n, batch in enumerate(batches(with_article, batch_size), start=1):
@@ -236,6 +260,24 @@ def phase_texts(client, mapping, ids, out_path, key, intro_only, batch_size):
             print(f"[{key}] {n * batch_size} fetched")
 
 
+def people_of_films(selection_dir, film_ids, people_ids, limit):
+    """Principals of the given films, read from the selection Parquet.
+
+    Used for test runs with --limit, so that the people fetched belong to
+    the films fetched. Falls back to the first people of the list if
+    pyarrow is not installed.
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        print("pyarrow not found: --limit takes the first people instead")
+        return people_ids[:3 * limit]
+    pairs = pq.read_table(f"{selection_dir}/principals_top",
+                          columns=["tconst", "nconst"]).to_pylist()
+    wanted = set(film_ids)
+    return sorted({p["nconst"] for p in pairs if p["tconst"] in wanted})
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection-dir", default="data/enrichment/selection")
@@ -255,7 +297,8 @@ def main():
     people_ids = load_ids(f"{args.selection_dir}/ids_people/*.csv", "nconst")
     if args.limit:
         film_ids = film_ids[:args.limit]
-        people_ids = people_ids[:3 * args.limit]
+        people_ids = people_of_films(args.selection_dir, film_ids,
+                                     people_ids, args.limit)
 
     client = PoliteClient(args.contact, args.delay)
     map_path = f"{args.out_dir}/wikidata_map.jsonl"
