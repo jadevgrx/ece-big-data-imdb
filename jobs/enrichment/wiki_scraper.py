@@ -53,17 +53,26 @@ class PoliteClient:
             f"ECE-BigData-IMDb-Enrichment/1.0 ({contact})")
         self.delay = delay
 
-    def request(self, method, url, max_attempts=6, **kwargs):
+    def request(self, method, url, max_attempts=12, max_wait=300,
+                **kwargs):
+        """Send a request, retrying with a capped exponential backoff.
+
+        With the defaults the client keeps trying for about 40 minutes,
+        so a short loss of connection (Wi-Fi, DNS, laptop waking up)
+        does not stop a long run.
+        """
         for attempt in range(max_attempts):
             time.sleep(self.delay)
+            backoff = min(5 * 2 ** attempt, max_wait)
             try:
                 resp = self.session.request(method, url, timeout=90, **kwargs)
             except requests.RequestException as exc:
-                print(f"  network error ({exc}), retrying")
-                time.sleep(5 * 2 ** attempt)
+                print(f"  network error ({type(exc).__name__}), "
+                      f"retrying in {backoff}s")
+                time.sleep(backoff)
                 continue
             if resp.status_code in (429, 500, 502, 503, 504):
-                wait = self._retry_after(resp, 5 * 2 ** attempt)
+                wait = min(self._retry_after(resp, backoff), max_wait)
                 print(f"  HTTP {resp.status_code}, waiting {wait}s")
                 time.sleep(wait)
                 continue
