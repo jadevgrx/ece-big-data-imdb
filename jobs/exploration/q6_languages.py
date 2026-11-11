@@ -15,8 +15,11 @@ Definitions (all thresholds are parameters):
 - by default a movie listing several original languages is left out,
   because one multilingual film would otherwise give an actor several
   languages at once (--include-multilingual keeps them);
-- a language only counts if it comes from a distinct film, so an actor
-  needs at least as many films as languages;
+- by default every film counted has exactly one language, so each
+  language of an actor comes from a different film. With
+  --include-multilingual this no longer holds (one film can bring several
+  languages), so two counts are printed: all languages (an upper bound)
+  and only the languages found in single-language films (a lower bound);
 - Wikidata sometimes names the same language in several ways (a variety
   such as "American English", or a synonym such as "Yue Chinese" for
   Cantonese). LANGUAGE_ALIASES maps these labels to one language, and
@@ -182,7 +185,14 @@ def step_analyze(spark, args):
         usable = usable.filter(F.col("n_languages") == 1)
     film_language = usable.select(
         "tconst", "primaryTitle", "startYear",
+        F.col("n_languages").alias("film_n_languages"),
         F.explode("languages").alias("language"))
+
+    n_usable = usable.count()
+    n_english = film_language.filter(F.col("language") == "English") \
+        .select("tconst").distinct().count()
+    print(f"Films used: {n_usable}, in English: {n_english} "
+          f"({100 * n_english / max(n_usable, 1):.1f} %)")
 
     print("Language labels used after normalization:")
     film_language.groupBy("language").agg(
@@ -202,15 +212,24 @@ def step_analyze(spark, args):
         .groupBy("nconst")
         .agg(
             F.countDistinct("language").alias("n_languages"),
+            F.countDistinct(
+                F.when(F.col("film_n_languages") == 1, F.col("language"))
+            ).alias("n_languages_single"),
             F.countDistinct("tconst").alias("n_films"),
             F.array_sort(F.collect_set("language")).alias("languages"),
         )
-        .filter((F.col("n_languages") >= 2)
-                & (F.col("n_films") >= F.col("n_languages")))
+        .filter(F.col("n_languages") >= 2)
         .join(names, on="nconst", how="left")
     )
     per_actor.write.mode("overwrite").parquet(f"{args.out_dir}/actors")
     per_actor = spark.read.parquet(f"{args.out_dir}/actors")
+
+    if args.include_multilingual:
+        for k in (2, 3):
+            lower = per_actor.filter(
+                F.col("n_languages_single") >= k).count()
+            print(f">= {k} languages from single-language films only "
+                  f"(lower bound): {lower}")
 
     at_least_three = per_actor.filter(F.col("n_languages") >= 3)
     print(f"Actors/actresses with successful films in >= 2 languages: "
