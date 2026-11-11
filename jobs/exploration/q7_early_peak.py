@@ -144,7 +144,9 @@ def summarize(rows, early_share):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--raw-dir", default="data/imdb/raw")
-    parser.add_argument("--out-dir", default="data/exploration/q7")
+    parser.add_argument("--out-dir", default=None,
+                        help="default: data/exploration/q7, or "
+                        "data/exploration/q7_adjusted with --adjust-year")
     parser.add_argument("--min-votes", type=int, default=1000)
     parser.add_argument("--min-span", type=int, default=20)
     parser.add_argument("--min-movies", type=int, default=15)
@@ -153,9 +155,16 @@ def main():
     parser.add_argument("--min-late", type=int, default=3)
     parser.add_argument("--min-drop", type=float, default=0.5)
     parser.add_argument("--show", type=int, default=30)
+    parser.add_argument("--thin-year", type=int, default=30,
+                        help="with --adjust-year, report the years with "
+                        "fewer counted movies than this")
     parser.add_argument("--adjust-year", action="store_true",
                         help="compare ratings minus the yearly mean rating")
     args = parser.parse_args()
+    if args.out_dir is None:
+        # Keep the raw and the adjusted results side by side.
+        args.out_dir = ("data/exploration/q7_adjusted" if args.adjust_year
+                        else "data/exploration/q7")
 
     spark = (
         SparkSession.builder
@@ -176,6 +185,14 @@ def main():
 
     movies = counted_movies(basics, ratings, args.min_votes,
                             args.adjust_year)
+    if args.adjust_year:
+        # The yearly mean is noisy when a year has few counted movies.
+        per_year = movies.groupBy("startYear").count()
+        thin = per_year.filter(F.col("count") < args.thin_year)
+        n_thin = thin.count()
+        movies_thin = thin.agg(F.sum("count")).first()[0] or 0
+        print(f"Years with fewer than {args.thin_year} counted movies: "
+              f"{n_thin} (holding {movies_thin} movies)")
     rows = with_career_position(actor_movies(principals, movies),
                                 args.min_span, args.min_movies)
     summary = summarize(rows, args.early_share).join(
