@@ -45,7 +45,11 @@ from pyspark.sql.types import (ArrayType, StringType, StructField,
 IMDB_NULL = "\\N"
 
 # Varieties and synonyms mapped to one language. Chinese labels follow the
-# usual split between Mandarin (standard Chinese) and Cantonese.
+# usual split between Mandarin (standard Chinese) and Cantonese. Arabic
+# dialects are grouped under Arabic. Serbian, Croatian, Bosnian and
+# Montenegrin are mutually intelligible standards of one language, labelled
+# "Serbo-Croatian" for many Yugoslav-era films, so they are grouped too:
+# otherwise one actor working in one language would count up to four.
 LANGUAGE_ALIASES = {
     "American English": "English",
     "British English": "English",
@@ -70,6 +74,19 @@ LANGUAGE_ALIASES = {
     "Mandarin Chinese": "Mandarin",
     "Standard Chinese": "Mandarin",
     "Standard Taiwanese Mandarin": "Mandarin",
+    "Sichuanese": "Mandarin",
+    "Egyptian Arabic": "Arabic",
+    "Moroccan Arabic": "Arabic",
+    "Levantine Arabic": "Arabic",
+    "Tunisian Arabic": "Arabic",
+    "Algerian Arabic": "Arabic",
+    "Gulf Arabic": "Arabic",
+    "Iraqi Arabic": "Arabic",
+    "Modern Standard Arabic": "Arabic",
+    "Serbian": "Serbo-Croatian",
+    "Croatian": "Serbo-Croatian",
+    "Bosnian": "Serbo-Croatian",
+    "Montenegrin": "Serbo-Croatian",
     "Modern Greek": "Greek",
     "Flemish": "Dutch",
     "Belgian Dutch": "Dutch",
