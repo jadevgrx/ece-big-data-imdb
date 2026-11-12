@@ -23,6 +23,15 @@ by --min-drop), to see whether early peaks are more common than late ones.
 The slope of rating against year (regr_slope) is also given for every
 eligible actor as a third, independent view of the trend.
 
+With --adjust-year, every comparison uses the rating minus the average
+rating of all counted movies of the same year. Older movies are rated
+higher on IMDb (mostly because only the ones that aged well still collect
+votes), and early movies are always older, so this option separates a
+career effect from an era effect.
+
+The career starts with the first counted movie (at least --min-votes
+votes), not with the real debut of the actor.
+
 Usage (inside the pyspark_notebook container, from /home/jovyan):
     spark-submit --driver-memory 4g jobs/exploration/q7_early_peak.py
 """
@@ -51,9 +60,14 @@ def safe_cast(column, data_type):
     return F.expr(f"try_cast(`{column}` AS {data_type})")
 
 
-def counted_movies(basics, ratings, min_votes):
-    """Movies with a year and a reliable rating."""
-    return (
+def counted_movies(basics, ratings, min_votes, adjust_year):
+    """Movies with a year and a reliable rating.
+
+    Adds "score", the value compared in the analysis: the rating itself,
+    or with adjust_year the rating minus the mean rating of the counted
+    movies of the same year.
+    """
+    movies = (
         basics.filter(F.col("titleType") == "movie")
         .withColumn("startYear", safe_cast("startYear", "INT"))
         .filter(F.col("startYear").isNotNull())
@@ -65,6 +79,12 @@ def counted_movies(basics, ratings, min_votes):
         .select("tconst", "primaryTitle", "startYear", "averageRating",
                 "numVotes")
     )
+    if not adjust_year:
+        return movies.withColumn("score", F.col("averageRating"))
+    by_year = Window.partitionBy("startYear")
+    return movies.withColumn(
+        "score",
+        F.col("averageRating") - F.avg("averageRating").over(by_year))
 
 
 def actor_movies(principals, movies):
@@ -96,7 +116,7 @@ def with_career_position(rows, min_span, min_movies):
 def summarize(rows, early_share):
     """Per actor: best movie, early and late averages, rating trend."""
     best_order = Window.partitionBy("nconst").orderBy(
-        F.desc("averageRating"), F.desc("numVotes"), F.col("startYear"))
+        F.desc("score"), F.desc("numVotes"), F.col("startYear"))
     best = (
         rows.withColumn("rn", F.row_number().over(best_order))
         .filter(F.col("rn") == 1)
@@ -112,9 +132,9 @@ def summarize(rows, early_share):
         .agg(
             F.sum(F.when(early, 1).otherwise(0)).alias("n_early"),
             F.sum(F.when(~early, 1).otherwise(0)).alias("n_late"),
-            F.avg(F.when(early, F.col("averageRating"))).alias("early_avg"),
-            F.avg(F.when(~early, F.col("averageRating"))).alias("late_avg"),
-            F.regr_slope("averageRating", "startYear").alias("trend"),
+            F.avg(F.when(early, F.col("score"))).alias("early_avg"),
+            F.avg(F.when(~early, F.col("score"))).alias("late_avg"),
+            F.regr_slope("score", "startYear").alias("trend"),
         )
         .withColumn("drop", F.col("early_avg") - F.col("late_avg"))
     )
@@ -124,7 +144,9 @@ def summarize(rows, early_share):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--raw-dir", default="data/imdb/raw")
-    parser.add_argument("--out-dir", default="data/exploration/q7")
+    parser.add_argument("--out-dir", default=None,
+                        help="default: data/exploration/q7, or "
+                        "data/exploration/q7_adjusted with --adjust-year")
     parser.add_argument("--min-votes", type=int, default=1000)
     parser.add_argument("--min-span", type=int, default=20)
     parser.add_argument("--min-movies", type=int, default=15)
@@ -133,7 +155,16 @@ def main():
     parser.add_argument("--min-late", type=int, default=3)
     parser.add_argument("--min-drop", type=float, default=0.5)
     parser.add_argument("--show", type=int, default=30)
+    parser.add_argument("--thin-year", type=int, default=30,
+                        help="with --adjust-year, report the years with "
+                        "fewer counted movies than this")
+    parser.add_argument("--adjust-year", action="store_true",
+                        help="compare ratings minus the yearly mean rating")
     args = parser.parse_args()
+    if args.out_dir is None:
+        # Keep the raw and the adjusted results side by side.
+        args.out_dir = ("data/exploration/q7_adjusted" if args.adjust_year
+                        else "data/exploration/q7")
 
     spark = (
         SparkSession.builder
@@ -152,7 +183,16 @@ def main():
     names = read_raw(spark, args.raw_dir, "name_basics",
                      ["nconst", "primaryName"])
 
-    movies = counted_movies(basics, ratings, args.min_votes)
+    movies = counted_movies(basics, ratings, args.min_votes,
+                            args.adjust_year)
+    if args.adjust_year:
+        # The yearly mean is noisy when a year has few counted movies.
+        per_year = movies.groupBy("startYear").count()
+        thin = per_year.filter(F.col("count") < args.thin_year)
+        n_thin = thin.count()
+        movies_thin = thin.agg(F.sum("count")).first()[0] or 0
+        print(f"Years with fewer than {args.thin_year} counted movies: "
+              f"{n_thin} (holding {movies_thin} movies)")
     rows = with_career_position(actor_movies(principals, movies),
                                 args.min_span, args.min_movies)
     summary = summarize(rows, args.early_share).join(
@@ -179,6 +219,9 @@ def main():
     n_result = result.count()
     n_negative = summary.filter(F.col("trend") < 0).count()
     n_late = peaked_late.count()
+    score = ("rating minus yearly mean" if args.adjust_year
+             else "raw rating")
+    print(f"Score compared: {score}")
     print(f"Eligible careers (>= {args.min_span} years, "
           f">= {args.min_movies} movies with >= {args.min_votes} votes): "
           f"{n_eligible}")
