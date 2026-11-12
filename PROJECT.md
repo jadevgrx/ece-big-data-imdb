@@ -9,8 +9,8 @@ part of the project from scratch. Results and methodology are in
 | Name | GitHub | Email | Main parts |
 | --- | --- | --- | --- |
 | Jade Vigouroux | jadevgrx | jade.vigou@gmail.com | Infrastructure, IMDb ingestion, streaming, PROJECT.md |
-| Adam | adamkh92 | adam05khe@gmail.com | Data preparation, exploration Q1 to Q4 and Q8 |
-| Melchior | MELKKIORR | melchior.gerrier13@gmail.com | Exploration Q5 to Q7, data enrichment |
+| Adam Kheloufi | adamkh92 | adam05khe@gmail.com | Data preparation, exploration Q1 to Q4 and Q8 |
+| Melchior Gerrier | MELKKIORR | melchior.gerrier13@gmail.com | Exploration Q5 to Q7, data enrichment |
 
 ## Prerequisites
 
@@ -91,14 +91,79 @@ some tables, for example `--tables title.ratings`.
 The raw layer keeps every column as a string and keeps `\N` as it is, so that
 the preparation step measures null values on the original data. IMDb updates
 its files every day, so results can differ slightly depending on the download
-date.
+date. Each run records in `data/imdb/manifest.json`, for every table, the
+source URL, the download time, the Last-Modified date sent by IMDb and the
+number of rows. A table with 0 rows (for instance after a corrupted download)
+stops the script with the command to download it again.
 
-## 3. Data preparation and exploration Q1 to Q4 and Q8
+## 3. Data preparation
 
-<!-- TODO Adam: list your scripts in the order they must run, with the exact
-command for each one and what they write. -->
+The three scripts read the raw layer. The first two only measure and
+report; the third one builds the clean layer used by Q1 to Q4 and Q8.
 
-## 4. Exploration Q5 to Q7
+Percentage of null, missing and empty values for every column of every
+table (`--sample 0.01` gives a quick approximate run):
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/preparation/missing_values.py
+```
+
+Data quality checks (impossible dates, orphan foreign keys, duplicates,
+out of range values). It only counts and shows examples, it changes
+nothing. A single check can be run with `--only`, for example
+`--only death_before_birth`. The full run takes about 15 minutes:
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g --conf "spark.driver.extraJavaOptions=-XX:MaxDirectMemorySize=2g" /home/jovyan/jobs/preparation/quality_checks.py
+```
+
+Build the clean layer in `data/imdb/clean/` (typed columns, `\N` replaced
+with null, lists as arrays, quality issues handled):
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g --conf "spark.driver.extraJavaOptions=-XX:MaxDirectMemorySize=2g" /home/jovyan/jobs/preparation/clean_imdb.py
+```
+
+Outputs are written in `data/preparation/`.
+
+## 4. Exploration Q1 to Q4 and Q8
+
+These scripts read the clean layer, so section 3 must have run first.
+Outputs are written in `data/exploration/`.
+
+Q1, feature-length movies whose runtime is far from the average of their
+genre (z-score by default, IQR as an alternative):
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q1_runtime_outliers.py
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q1_runtime_outliers.py --method iqr
+```
+
+Q2 and Q3, top three genres per year from 1980 to 2025 and how they compare
+with the other genres (popularity measured by votes by default, by number of
+movies with `--metric movies`):
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q2_q3_top_genres.py
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q2_q3_top_genres.py --metric movies
+```
+
+Q4, directors with exactly one movie rated 8 or more and a weak rest of
+career:
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q4_one_hit_directors.py
+```
+
+Q8, multi-talented professionals and how they perform when they hold
+several roles on the same movie (the script asks for 6 GB of driver
+memory, so Docker needs at least 8 GB):
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 6g /home/jovyan/jobs/exploration/q8_multi_talented.py
+```
+
+## 5. Exploration Q5 to Q7
 
 Q5, series whose worst episode is in the last season and best episode in the
 first two seasons (all series, then ended series only):
@@ -119,9 +184,19 @@ docker exec -w /home/jovyan pyspark_notebook python -u jobs/exploration/q6_fetch
 docker exec -w /home/jovyan pyspark_notebook spark-submit --driver-memory 4g jobs/exploration/q6_languages.py --step analyze
 ```
 
-<!-- TODO Melchior: add the Q7 command. -->
+Q7, actors and actresses with a career of 20 years or more and at least 15
+movies whose best movies came early. The second run compares each rating
+with the average of its year, to separate a career effect from the fact that
+older movies are rated higher on IMDb:
 
-## 5. Data enrichment
+```bash
+docker exec -w /home/jovyan pyspark_notebook spark-submit --driver-memory 4g jobs/exploration/q7_early_peak.py
+docker exec -w /home/jovyan pyspark_notebook spark-submit --driver-memory 4g jobs/exploration/q7_early_peak.py --adjust-year
+```
+
+Q5 to Q7 read the raw layer, so they only need section 2.
+
+## 6. Data enrichment
 
 The three steps must run in this order.
 
@@ -151,7 +226,7 @@ Spark:
 docker exec -w /home/jovyan pyspark_notebook spark-submit --driver-memory 4g jobs/enrichment/clean_enrichment.py
 ```
 
-## 6. Streaming
+## 7. Streaming
 
 Build the IMDb lookup table used to recognize Wikipedia pages (once, after
 the ingestion):
@@ -170,7 +245,8 @@ docker exec pyspark_notebook spark-submit --driver-memory 4g --packages org.apac
 When the first `batch=` lines are printed, start the producer in the second
 terminal. It reads the Wikimedia recent changes stream and publishes the
 article edits of the English, French, German, Spanish and Italian Wikipedia
-to the Kafka topic `wikistreams`:
+to the Kafka topic `wikistreams`. Events sent again after a reconnection are
+dropped by their id:
 
 ```bash
 docker compose run --rm --build producer --minutes 32
@@ -192,7 +268,25 @@ start a test from zero, delete the folder first:
 docker exec pyspark_notebook rm -rf /home/jovyan/data/streaming
 ```
 
-## 7. Open question
+### Late data test
+
+To check the watermark, run the job with a separate output folder, then send
+two test events for the page Inception from a second terminal: one dated now,
+then 75 seconds later one dated 30 minutes earlier. The late one must be kept
+in `matched_events` and dropped from the two aggregations (`late_dropped` in
+the summary):
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0 /home/jovyan/jobs/stream_wiki_imdb.py --minutes 6 --starting-offsets latest --output-dir /home/jovyan/data/streaming_late_test --report-every 30
+docker compose run --rm --build --entrypoint python producer inject_late_events.py --minutes-late 30
+docker exec pyspark_notebook spark-submit /home/jovyan/jobs/show_stream_results.py --output-dir /home/jovyan/data/streaming_late_test
+```
+
+The first command goes in one terminal; start the second one when the job
+prints `Lookup loaded`, and the third one when the job has stopped. The test
+events are marked with the user `late-data-test`.
+
+## 8. Open question
 
 <!-- TODO: commands of the open question. -->
 
