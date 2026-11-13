@@ -12,8 +12,10 @@ vote-weighted average rating. A movie with several genres counts in each
 of them, so shares are computed on genre level totals.
 
 Usage (inside the pyspark_notebook container):
-    spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q2_q3_top_genres.py
-    spark-submit /home/jovyan/jobs/exploration/q2_q3_top_genres.py --metric movies
+    spark-submit --driver-memory 4g \\
+        /home/jovyan/jobs/exploration/q2_q3_top_genres.py
+    spark-submit /home/jovyan/jobs/exploration/q2_q3_top_genres.py --metric \\
+        movies
 """
 
 import argparse

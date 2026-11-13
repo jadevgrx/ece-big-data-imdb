@@ -8,8 +8,10 @@ Types are converted with try_cast, so the IMDb null marker "\\N" and any
 malformed value become null instead of failing (Spark 4 runs in ANSI mode).
 
 Usage (inside the pyspark_notebook container):
-    spark-submit --driver-memory 4g /home/jovyan/jobs/preparation/quality_checks.py
-    spark-submit /home/jovyan/jobs/preparation/quality_checks.py --only death_before_birth
+    spark-submit --driver-memory 4g \\
+        /home/jovyan/jobs/preparation/quality_checks.py
+    spark-submit /home/jovyan/jobs/preparation/quality_checks.py --only \\
+        death_before_birth
 """
 
 import argparse
