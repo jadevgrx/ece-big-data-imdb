@@ -17,8 +17,10 @@ tested and come out as outliers. Announced movies (is_future_release)
 are excluded since their runtime is not final.
 
 Usage (inside the pyspark_notebook container):
-    spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q1_runtime_outliers.py
-    spark-submit /home/jovyan/jobs/exploration/q1_runtime_outliers.py --method iqr
+    spark-submit --driver-memory 4g \\
+        /home/jovyan/jobs/exploration/q1_runtime_outliers.py
+    spark-submit /home/jovyan/jobs/exploration/q1_runtime_outliers.py \\
+        --method iqr
 """
 
 import argparse
