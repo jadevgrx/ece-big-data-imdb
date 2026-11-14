@@ -288,7 +288,28 @@ events are marked with the user `late-data-test`.
 
 ## 8. Open question
 
-<!-- TODO: commands of the open question. -->
+Do directors make better movies with actors they have already worked
+with? The script reads the clean layer, so section 3 must have run first.
+It uses no external data.
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/open_question/director_actor_duos.py
+```
+
+The two variants used in the report to check that the result does not
+depend on the thresholds:
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/open_question/director_actor_duos.py --min-votes 10000
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/open_question/director_actor_duos.py --min-previous 2
+```
+
+Every setting writes its tables as CSV in its own folder,
+`data/open_question/director_actor_duos/<settings>/`, so the runs do not
+overwrite each other. The other thresholds are `--skip-first` (first
+movies of each director left out, 2 by default), `--min-each` (minimum
+movies per group and director, 2 by default) and `--min-duo-movies`
+(minimum movies together in the table of duos, 4 by default).
 
 ## Stopping the environment
 
