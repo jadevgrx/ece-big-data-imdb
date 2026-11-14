@@ -55,9 +55,14 @@ logging.basicConfig(
 log = logging.getLogger("director_actor_duos")
 
 
-def rated_movies(titles, ratings, min_votes):
-    """Released feature-length movies with enough votes."""
-    return (
+def rated_movies(titles, ratings, min_votes, adjust_year=False):
+    """Released feature-length movies with enough votes.
+
+    With adjust_year, averageRating is replaced by its difference with
+    the mean rating of the movies kept for the same year, so every
+    comparison below removes the era effect.
+    """
+    movies = (
         titles
         .filter(
             (F.col("titleType") == "movie")
@@ -68,6 +73,16 @@ def rated_movies(titles, ratings, min_votes):
         .join(ratings.filter(F.col("numVotes") >= min_votes), "tconst")
         .select("tconst", "primaryTitle", "startYear", "averageRating",
                 "numVotes")
+    )
+    if not adjust_year:
+        return movies
+    yearly = movies.groupBy("startYear").agg(
+        F.avg("averageRating").alias("year_avg"))
+    return (
+        movies.join(yearly, "startYear")
+        .withColumn("averageRating",
+                    F.col("averageRating") - F.col("year_avg"))
+        .drop("year_avg")
     )
 
 
@@ -254,6 +269,9 @@ def parse_args():
     parser.add_argument("--min-duo-movies", type=int, default=4,
                         help="Minimum movies together for the top duos "
                              "(default: %(default)s)")
+    parser.add_argument("--adjust-year", action="store_true",
+                        help="Compare ratings minus the mean rating of "
+                             "the same year")
     return parser.parse_args()
 
 
@@ -264,6 +282,8 @@ def main():
     clean_dir = data_dir / "imdb" / "clean"
     settings = (f"votes_{args.min_votes}_prev_{args.min_previous}"
                 f"_skip_{args.skip_first}_each_{args.min_each}")
+    if args.adjust_year:
+        settings += "_adjusted"
     output_dir = (data_dir / "open_question" / "director_actor_duos"
                   / settings)
 
@@ -279,7 +299,7 @@ def main():
         return spark.read.parquet(str(clean_dir / name))
 
     movies = rated_movies(read("title_basics"), read("title_ratings"),
-                          args.min_votes).cache()
+                          args.min_votes, args.adjust_year).cache()
     directed = director_movies(movies, read("title_crew")).cache()
     actors = actor_credits(movies, read("title_principals"))
     pairs = pair_credits(directed, actors).cache()
