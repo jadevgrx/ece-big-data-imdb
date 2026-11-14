@@ -15,8 +15,10 @@ person compared with themselves). A pooled view by role combination is
 also given.
 
 Usage (inside the pyspark_notebook container):
-    spark-submit --driver-memory 6g /home/jovyan/jobs/exploration/q8_multi_talented.py
-    spark-submit /home/jovyan/jobs/exploration/q8_multi_talented.py --min-movies 5
+    spark-submit --driver-memory 6g \\
+        /home/jovyan/jobs/exploration/q8_multi_talented.py
+    spark-submit /home/jovyan/jobs/exploration/q8_multi_talented.py \\
+        --min-movies 5
 """
 
 import argparse

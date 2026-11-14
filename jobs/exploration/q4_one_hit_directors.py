@@ -11,8 +11,10 @@ often extreme. Directors come from title_crew (all credited directors,
 co-directors included).
 
 Usage (inside the pyspark_notebook container):
-    spark-submit --driver-memory 4g /home/jovyan/jobs/exploration/q4_one_hit_directors.py
-    spark-submit /home/jovyan/jobs/exploration/q4_one_hit_directors.py --min-votes 100
+    spark-submit --driver-memory 4g \\
+        /home/jovyan/jobs/exploration/q4_one_hit_directors.py
+    spark-submit /home/jovyan/jobs/exploration/q4_one_hit_directors.py \\
+        --min-votes 100
 """
 
 import argparse

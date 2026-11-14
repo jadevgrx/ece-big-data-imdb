@@ -271,7 +271,6 @@ def main():
     )
     spark.sparkContext.setLogLevel("WARN")
 
-
     clean = {}
     for name in ("title_basics", "name_basics"):
         if name not in args.tables:

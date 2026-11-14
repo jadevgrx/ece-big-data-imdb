@@ -7,7 +7,8 @@ separately, then combined into a single percentage:
     - empty or whitespace-only strings.
 
 Usage (inside the pyspark_notebook container):
-    spark-submit --driver-memory 4g /home/jovyan/jobs/preparation/missing_values.py
+    spark-submit --driver-memory 4g \\
+        /home/jovyan/jobs/preparation/missing_values.py
     spark-submit /home/jovyan/jobs/preparation/missing_values.py --sample 0.01
 """
 
