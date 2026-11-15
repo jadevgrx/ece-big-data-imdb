@@ -75,6 +75,11 @@ docker rm -f kafka pyspark_notebook
   number raises an error instead of returning null. All our jobs use
   `try_cast` or replace `\N` with null before casting.
 - All timestamps written by the jobs are in UTC.
+- If a job reading `title_principals` fails with "Cannot allocate memory"
+  or `OutOfMemoryError`, run it with less memory and fewer threads, for
+  example `spark-submit --master local[2] --driver-memory 4g --conf
+  "spark.driver.extraJavaOptions=-XX:MaxDirectMemorySize=1g" ...` (found by
+  Melchior when testing on his machine).
 
 ## 2. Ingest the IMDb dataset
 
@@ -310,6 +315,15 @@ overwrite each other. The other thresholds are `--skip-first` (first
 movies of each director left out, 2 by default), `--min-each` (minimum
 movies per group and director, 2 by default) and `--min-duo-movies`
 (minimum movies together in the table of duos, 4 by default).
+
+With `--adjust-year`, every rating is replaced by its difference with the
+mean rating of the movies of the same year, to remove the era effect (older
+movies are rated higher on IMDb). The results go to a separate folder whose
+name ends with `_adjusted`:
+
+```bash
+docker exec pyspark_notebook spark-submit --driver-memory 4g /home/jovyan/jobs/open_question/director_actor_duos.py --adjust-year
+```
 
 ## Stopping the environment
 
