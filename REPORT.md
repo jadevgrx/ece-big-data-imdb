@@ -6,7 +6,36 @@ Group gr-01. Setup and run instructions are in [PROJECT.md](PROJECT.md).
 
 ### 1.1 Ingestion
 
-<!-- Jade -->
+I exported the IMDb of 9 Nov., here are the results (only title.ratings was downloaded again on 10 Nov.):
+
+| Table | Rows |
+| --- | ---: |
+| title.principals | 102,629,356 |
+| title.akas | 60,307,782 |
+| name.basics | 15,800,186 |
+| title.basics | 12,949,098 |
+| title.crew | 12,948,225 |
+| title.episode | 10,023,528 |
+| title.ratings | 1,730,480 |
+| Total | 216,388,655 |
+
+You can here see how many lines we have in all the differents 7 files. It is range by the size, the bigger one at first, and the others after. 
+
+Each table has his own role:
+
+The title.principals list the principal personnage of each title, if they are actors, realisators, compositors etc... There is one line per person and per title, that's why it's the bigger one with 102,6 millions on lines.
+
+The name.basics is the sheet of each person.
+
+The title.basics tell us all the titles and if it's a film, serie, episode, or a short film, and others.
+
+The title.akas tell us the differents titles of title.basics like in different languages. we have more lines here than in title.basics because on title may have other name in other countries.
+
+The title.crew tell us all the realisators and scenarists of each title. We can see that it's almost the same lines as title.basics.
+
+The title.episode relate each episode to its serie.
+
+The title.ratings tell us the average rating and the number of vote, but only for the titles who received a vote. That's why we only have 1,7 millions of lines while there are more than 12 millions of titles.
 
 ### 1.2 Null, missing and empty values
 
@@ -183,7 +212,19 @@ The dropped rows match the check counts exactly: 30 rows in title_crew, 5 in tit
 
 #### Methodology and why it was chosen
 
-<!-- Jade: ingestion part -->
+##### Ingestion
+
+We are using Spark because in Excel, in one table we only can have 1 million lines, and a Python script loads all the data in only one machine. But here we have 216 millions lines and 102 million only in title.principals, so Spark cut it in pieces and even if the data is bigger, it will work.
+
+We use Parquet instead of a TSV file because a TSV has to be read entirely with only one process, while Parquet is cut by blocs that Spark can read in parallel. Also, it reads column by column, so if we don't use all of them, Spark will not read all but just the ones we need. We convert it only one time, and the relecture is less long after.
+
+I take the date because I downloaded the title.ratings on 9 nov and again on 10 nov, and we had more lines the second time (it was 1 730 480 and after 1 730 885). So the files change every day. That's why the script writes automatically, at each download, the date and the number of lines of each table in data/imdb/manifest.json.
+
+All the columns stay in text, and we keep the `\N` of IMDb like they are, because the job of Adam was to measure the null, missing or empty values. If we had already converted the columns or replaced the `\N` at the ingestion, he would measure a data already modified, and he could not know what come from IMDb and what come from our conversion. So we keep a raw layer that is the same as IMDb, and after it's the preparation of Adam that build the cleaned layer.
+
+The Docker image is fixed with its ID. In the lab of the course, we always took the last version of the Jupyter image, but it can change before the correction. With a fixed version, everybody (the professor also) have exactly Spark 4.2.0, so the good Kafka connector.
+
+##### Preparation
 
 For the missing values, we read the raw layer, where all columns are text and `\N` is kept on purpose at ingestion. This is what lets us separate real nulls, markers and empty strings. All the counts of a table are computed in a single aggregation, so each table is read only once.
 
@@ -193,7 +234,11 @@ The treatment follows one idea: remove only what cannot be used and keep what is
 
 #### Alternatives considered and trade-offs
 
-<!-- Jade: ingestion part -->
+##### Ingestion
+
+Each choice has a cost. If we kept the TSV files, we would not have the 16 minutes of conversion and the disk space in double, but every job would have to decompress and read again all the text at each launch, with only one core. If we converted the types directly at the ingestion, we would win one step, but we would lose the original data that Adam needed for the preparation. In the other hand, every script that read the raw layer have to convert the columns itself with try_cast. To finish, keep the image in the last version would be more easy, but we had no guarantee that the project run the same way on the professor computer. The price of the fixed version is that we have to update it by hand.
+
+##### Preparation
 
 Converting `\N` to null at ingestion would have been simpler, but we could no longer tell where a missing value comes from. Counting only Spark nulls on the raw layer would have given 0% missing everywhere, which is wrong.
 
@@ -934,42 +979,200 @@ Everything depends on Wikidata; if a movie or person isn't listed there, or does
 
 ### 4.1 Pipeline
 
-<!-- Jade -->
+Here is the IMDb lookup table used to recognize Wikipedia pages:
+
+| Lookup | Keys |
+| --- | ---: |
+| Titles (by name) | 209,785 |
+| People (by name) | 378,176 |
+| Total by name | 587,961 |
+| Titles by name and year | 227,969 |
+
+This table tell us if a wikipedia page talk about a film or a person.
+
+The wiki_imdb_lookup.py build once a table that make the link between a name and an IMDb id. it's tt... for a title and nm... for a person. It is important because when a person write something on Wikipedia, it doesn't have the IMDb id, but just the title of the page.
+
+We have here the keys for each film or people. A film can have several keys, for example the principal title, the original title and the translations, but each key gives only one response.
+
+When two entry have the same name, it keeps the one with the most vote, so we have only one result.
+
+That's why we made Titles by name and year for the homonymes. If the wikipedia page has one film like Dune of 1984 and Dune of 2021, but with the same name, the one which will have the most vote will appear, even if we are in the 1984 film, because it's the one with more vote (nowadays). So this table associate each title with its year.
+
+In our first version, we used all the people known for the films with at least 1 000 votes. but we had too many results (more than 2,6 million people) because there are stuntmen, editors or assistant. so we redo it with only the actors, actresses, directors, writers and producers, known for a film with at least 20 000 votes (and now it is 378 176 people). We don't have the not well known people, but it is more accurate (because we avoid current name which make false match) and faster (beacuse of the memory).Also, this threshold is bigger for the people because there are more homonyms for people than for the films.
+
+The pipeline has three steps, and each one is in a different program.
+
+First, the producer (producer/producer.py) run in his own Docker container. It open only one connection to the public stream of Wikimedia, that announce in direct all the modifications. It keeps only the edits and the creations of articles in the english, french, german, spanish and italian Wikipedia, and send them like they are (the original JSON) in the Kafka topic wikistreams. If the connection is cut, it reconnect from the last event received and ignore the duplicates.
+
+Then, Kafka is like a buffer between the producer and Spark: the producer write, and Spark read when he can. So if Spark is slow or restart, the events wait in Kafka and they are not lost.
+
+To finish, the Spark job (jobs/stream_wiki_imdb.py) load first the lookup table of 587 961 names (the one explained before). After, every 30 secondes, it read the new events in Kafka, and take for each one the title of the page, the language, the hour, the author and the size of the modification. Then it normalize the title and search it in the table. Normalize means we put the title in lowercase, we clean the spaces and we remove the parenthesis at the end. There are 3 cases. A page without parenthesis like "Inception" is compared directly, it's an exact_title. A page with a parenthesis about cinema like "Dune (1984 film)" or "Un singe en hiver (film)" is recognized with more confidence, it's a disambiguated, and if there is a year in the parenthesis, we search the film of this year. A page with a parenthesis that has nothing to do with cinema, like "Camille (chanteuse)", is rejected, because it's just an other subject with the same name than a film.
+
+The results are written in Parquet in data/streaming/, with three outputs. matched_events keep every edit recognized, one line per event. edits_per_window count the edits by fixed slices of 5 min, per Wikipedia and per type (film or person). trending_entities count, on slices of 10 min that move every 5 min, how many times each film or person was edited. Only matched_events make the search in the IMDb table, the two others read again its Parquet files like a stream. Each query has a checkpoint to restart where it stopped, and the stats of each batch are saved in progress.jsonl, that's where our metrics come from.
 
 ### 4.2 Results and streaming metrics
 
-<!-- Jade -->
+I test it during 30 minutes, here are the results: (10 Nov., all the hours are in UTC)
+
+| Measure | Value |
+| --- | --- |
+| Producer run | 09:40 to 10:12:54 |
+| Events received from Wikimedia | 60,325 |
+| Events kept after the filter | 3,224 (5.3%) |
+| Producer reconnections | 1 (10:03:46, resumed after 1 s) |
+| Spark job run | 09:40 to 10:10:54 |
+| Micro-batches with data | 60 |
+| Rows read from Kafka | 2,918 |
+| Events matched with IMDb | 200 (6.9%) |
+| Rows processed by the aggregations | 197 |
+| Max input rate | 2.3 rows/s |
+| Max processing rate | 25.9 rows/s |
+| Rows dropped by the watermark | 0 |
+
+We can see that the producer receive 60 325 events of Wikimedia between 9h40 and 10h12 (UTC). We keep only the changes in the english, french, german, spanish and italian. so we have after that only 3 224 events (5,3%). It deconnected once (at 10h03) but reload after 1sec with the last event received.
+
+Then, Spark read 2 918 events on Kafka. it's a little bit less than 3 224 because it stops at 10h10, so it's 2 min before the producer. We can see these data with 60 batches, every 30 secondes.
+
+Only 200 are rely on IMDb (so it's 6,9%). This is not musch but it's because the others are from other topics like sport, political etc...
+
+We also can se that the rows processed by aggregations are 197, so 3 are missing. it's because of the stop, it have note been read yet. The aggregations go through the matched_events files with a batch offset, and the last 3 were written in the very last batch.
+
+We can see that the max input rate was 2,3 rows/s and the max processing rate is 25,9 rows/s, so if there are more data, it will run anyway. So it was not too dificult for the system. We have a marge for more data. To finish, there was not rows dropped by the watermark because Wikimedia sends each event a few seconds after the edit, so no one was later than 10min.
+
+Here are the matched events by type and match quality:
+
+| Entity type | disambiguated | exact_title | Total |
+| --- | ---: | ---: | ---: |
+| title | 31 | 77 | 108 |
+| person | 1 | 91 | 92 |
+| Total | 32 | 168 | 200 |
+
+And here the matched events by Wikipedia edition:
+
+| Wiki | Matched events |
+| --- | ---: |
+| enwiki | 92 |
+| itwiki | 66 |
+| frwiki | 16 |
+| eswiki | 14 |
+| dewiki | 12 |
+
+The second table class the events by title (108) and person (92), so we have the same total result as the first table (200). It class also if the event is disambiguated, or if it's the exact title.
+
+The last table reparti it in the different language. We can see that the english dominate it with 92 events, almost the half. The italian is second with 66 events, but it's because a bot modified 28 pages of movies at the same time around 9h40, and without changing any byte.
 
 ### 4.3 Late arriving data
 
-<!-- Jade -->
+Here are the synthetic events for the page Inception (enwiki), watermark of 10 minutes, on 10 Nov:
+
+| Test | Event time | Sent to Kafka | Watermark when it arrived | In matched_events | late_dropped (edits_per_window / trending_entities) |
+| --- | --- | --- | --- | --- | --- |
+| 1, both events in the same batch | 14:12:37 | 14:42:37 | not moved yet | yes | 0 / 0 |
+| 2, late event one batch later | 14:27:53 | 14:59:08 | 14:47:53 | yes | 1 / 2 |
+
+Each Wikipedia event has two hours: one is the hour when the change happened (meta.dt), and one is the hour when it arrives in Kafka. Normally they are almost the same, but sometimes an event can arrive late, for example after a breakdown. The aggregations count the changes in slices of 5 min with the event hour. The problem is that Spark can't keep all the slices open all the time to wait a late event, because the memory would grow and grow.
+
+So Spark look at the most recent event hour he has seen, and remove 10 minutes, and everything older is closed. If the most recent was at 14:57:53, the watermark is at 14:47:53, so an event of 14:30 that arrive now is too late and not counted in the aggregations. The late_dropped is how many time Spark has refused it. The table matched_events keeps all the events, even the late ones, because it doesn't make aggregations, so it has no slices to close.
+
+For the two tests we use the script inject_late_events.py, that send two fake events for the page "Inception": one with the hour of now, and one with 30 minutes before.
+
+In the test 1, the two events were sent at the same time, at 14:42:37, so Spark read them in the same batch. But the watermark move only at the end of a batch, so during this batch he didn't see any recent event yet, nothing was closed and the late event was accepted. So we have 0 dropped.
+
+For test 2, we fixed the script to wait 75 seconds between the two sends. The on-time event, dated 14:57:53, was processed alone in a batch, which moved the watermark to 14:47:53. Then the late event, dated 14:27:53, arrived at 14:59:08, so 20 minutes behind the watermark. so it it present in the matched_events, but dropped agregations, with the late_dropped in 1 for the slices of 5 min, and 2 for the slices of 10 min sliding windows, because it fell into two overlapping slices.
 
 ### 4.4 Methodological explanation
 
 #### Methodology and why it was chosen
 
-<!-- Jade -->
+We put the producer in a container, and not on the PC like in the lab, so anyone can relaunch the project "from scratch" without installing Python or libraries, like the instructions ask. It send the raw events without looking for IMDb, because all the logic (normalization, join, windows, late data) is in Spark, it's the tool we have to use for the processing. Like that, we can change the rules for the matching without touching the producer.
+
+We took these five Wikipedia because there is enough volume in 15 to 30 minutes, their translated titles are in the table, they are in latin alphabet and we don't have useless noise.
+
+The two kinds of slices answer two different questions. The fixed slices of 5 min give the global activity per period, and nothing is counted two times. The sliding slices of 10 min follow a film or a person in a more smooth way: if a page is edited at 09:44 and at 09:46, it is in the same slice, even if it's on two fixed slices.
+
+When Spark join a stream with a fixed table, he do the join again at each batch. By default, if the table look small enough, he send a full copy of it in memory at each calcul (it's the broadcast). In our first version, the three queries did each one their own join, and even two per query (one for the titles without year and one for the titles with year). So the table of almost 600 000 names was sent six times every 30 secondes. During our test of 10 Nov. morning, we had OutOfMemoryError: Java heap space errors around every 90 secondes, even with 4 GB of memory. Spark recovered, but on 30 minutes it could crash.
+
+We did three changes to solve it. We disabled the broadcast and we keep the table in cache, so Spark make a normal join that don't overload the memory. We merged the two tables in only one, with a key "title" or "title#year", so there is only one join per batch, and it also fixed a hidden problem because the old version read Kafka two times per batch. And only matched_events make the join, the two aggregations read again its files. After that, we had no memory error during all the test.
+
+But this architecture in two levels has two problems. The aggregations have one batch late on matched_events, that's why we have 197 rows on 200. And each batch write small Parquet files that the aggregations have to list again, we can see it with the warning "Listed 192 file(s) in 2140 ms". On 30 minutes it's not a problem, but on several days the listing would be more and more slow.
+
+We count with the hour of the event and not the hour of arrival in Kafka, because we want to know when the pages were edited, not when our system received them. The watermark of 10 minutes is a compromise: with one minute, a simple reconnection of the producer would be lost, and with two hours, Spark would keep two hours of slices in memory and the results would arrive two hours later. Wikimedia send in few secondes, so 10 minutes is enough if the producer cut. The append mode write each slice only one time, when the watermark close it, so a result written is final, but the slices still open when we stop are never written, that's why our test stop at 09:55. We remove the duplicates in the producer and not in Spark, because dropDuplicatesWithinWatermark would also remove the late events from matched_events, and the duplicates can only come from a reconnection of the producer.
 
 #### Alternatives considered and trade-offs
 
-<!-- Jade -->
+We also looked at other options. The broadcast is more fast but it's him that made the memory errors. Three separate joins are more easy to write, but it's three times more work and memory. foreachBatch do only one join, but the windows with watermark become complicated to manage. A Kafka topic between the two levels would avoid the small files, but it's one more thing to configure. The update and complete modes give results more fast or always complete, but a slice can be written several times, and complete keep everything in memory. And slices with the processing hour are more simple but they are false as soon as there is a delay.
+
+The pipeline has still some limits. The homonyms in exact_title make false matchs, like the article "Caffeine" linked to a film. The translated titles are used without looking the language of the wiki, so "Providence" is linked to The Last Shot. The small files accumulate. The lookup table is fixed when we start, so it don't see the new IMDb films added during the streaming. And everything run on only one Kafka and Spark node on a PC, but in production there would be several.
 
 ## 5. Open question
 
 ### 5.1 Question, interest and data
 
-<!-- To decide -->
+For the open question, we want to know if the directors make better movies with actors they already know. It's an idea that we hear a lot, when we think about the famous duos that everybody know like Scorsese and De Niro, Burton and Depp or Nolan and Michael Caine: people often say that a director work better with "his" actors, because they know each other and they have confidence. But we wanted to check if it's true, or if we just remember the duos that succeeded.
+
+The answer could be useful for a producer or a casting director, for example if he hesitate between taking again an actor that the director already know, or choosing a new one.
+
+This question is different from the Q1 to Q8, because they look at films, genres, series or the career of only one person. No one look at the link between two persons who work together.
+
+It ask a real analysis, because we have to join several tables (directors, actors, ratings, films), follow the collaborations in the time, and compare each director with himself, that's what the instructions call a "non trivial" question.
+
+The script jobs/open_question/director_actor_duos.py start from the cleaned layer of Adam and join five tables: title_basics for the films, title_ratings for the ratings, title_crew for the directors, title_principals for the actors and name_basics for the names. It keeps only the "movie" of at least 40 minutes, already released, with at least 1 000 votes, so we don't have ratings made by only few people. We didn't use any additional data: everything comes from the IMDb dataset.
 
 ### 5.2 Results and key takeaways
 
-<!-- To decide -->
+Here are the paired comparison, reunion cast minus new cast, on 12 Nov.:
+
+| Setting | Directors | Mean diff | Median diff | t | % higher with reunion | Mean log10 votes ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default (1 earlier movie, 1,000 votes) | 1,075 | +0.025 | +0.021 | 1.4 | 51.6 | +0.024 |
+| 10,000 votes | 331 | +0.029 | +0.032 | 0.95 | 52.9 | +0.056 |
+| 2 earlier movies | 843 | -0.046 | -0.03 | -2.4 | 47.4 | -0.042 |
+
+Here: the gap to the director's own mean by number of returning actors (it's default setting):
+
+| Returning actors | Movies | Mean gap | Mean rating |
+| --- | ---: | ---: | ---: |
+| 0 | 4,651 | -0.007 | 6.39 |
+| 1 | 3,265 | +0.004 | 6.46 |
+| 2 | 1,755 | +0.017 | 6.48 |
+| 3+ | 2,028 | -0.006 | 6.50 |
+
+And finnaly the director and actor pairs with the most movies together (it's for all movies, not only for the earlier ones):
+
+| Director | Actor | Movies together | Other movies | Rating together | Rating without | Diff |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Kartal Tibet | Kemal Sunal | 26 | 9 | 6.91 | 5.40 | +1.51 |
+| Gerald Thomas | Kenneth Williams | 25 | 7 | 6.12 | 5.49 | +0.64 |
+| Akira Kurosawa | Toshirō Mifune | 16 | 15 | 7.81 | 7.25 | +0.56 |
+| John Ford | John Wayne | 14 | 38 | 7.25 | 6.90 | +0.35 |
+| Priyadarshan | Paresh Rawal | 14 | 25 | 6.53 | 7.21 | -0.68 |
+
+The first table show the results with three settings. "Directors" is the number of directors we compare. "Mean diff" and "Median diff" are the average and the median difference between the two groups, in points on 10: +0,025 means that the "reunion" films have 0,025 point more in average, so it's almost nothing. "t" tell us if the difference is big enough to not be because of chance, under around 2 (in absolute value) it can be chance. "% higher with reunion" is the part of directors who have better ratings with actors they know, here 51,6%, so almost one chance on two. The last column compare the popularity of the two groups, with the number of votes.
+
+The three lines are here to check that the conclusion don't depend of the thresholds. With the default setting, and when we keep only the very known movies (at least 10 000 votes), the difference is almost zero and not significant (t of 1,4 and 0,95). With a more strict definition, where the actor has to have already done two films with the director, the difference is a little bit negative (-0,046) and significant (t = -2,4), but it's still very small. So in general, the reunions don't have a real effect on the rating.
+
+The second table check if the effect grow with the number of actors already known. For each movie, we calculate the difference between its rating and the average of its director, and then we make the average by number of actors already known (0, 1, 2, 3 or more). If the reunions helped, the difference would grow. But it's not the case, it stay between -0,007 and +0,017.
+
+The third table show the most frequent duos, like Kurosawa and Mifune (16 films together, +0,56) or Ford and Wayne (14 films, +0,35). Here the difference look clear, so it seems to say the opposite of the rest. But this table count all their films, also the ones made after, and a duo that make 16 films together is a duo that worked. The duos that didn't work never became frequent, so we don't see them in this table. It's a selection bias, and that's why the main comparison count only the past collaborations.
 
 ### 5.3 Methodological explanation
 
 #### Methodology and why it was chosen
 
-<!-- Jade -->
+For each director, we put his films in two groups. A "reunion" film is a film where at least one actor already worked with him in a film of a previous year (strictly before). A "new cast" film is a film where no actor worked with him before. A director who play in his own film is not counted as his own actor. We remove the films without any actor credited (often documentaries), because "new cast" don't mean anything there. We also remove the two first films of each director, and we keep only the directors with at least two films in each group. Then for each director we calculate the average of his "reunion" films minus the average of his "new cast" films, and we summarize all these differences with the mean, the median, the part of directors who do better with a known cast, and the t statistic.
+
+We compare each director with himself (Hitchcock with Hitchcock, Ford with Ford) because the big directors often have loyal actors and good ratings. If we compared all the "reunion" films with all the "new cast" films, we would mostly measure who are the directors, and not the effect of the loyal actors. Like that, the talent of the director cancel.
+
+We count only the past collaborations, because if we counted also the future ones, we would measure that the success make the loyalty, and not the opposite. The table of the famous duos show exactly this bias.
+
+We remove the two first films because a first film can never be a reunion, there is nothing before. Without that, the "new cast" group would have all the beginnings of careers and the "reunion" group the films of experienced directors, so we would compare a beginner with an experienced director. And we want at least two films per group, because with only one film, the difference of a director depend of only one film, it's too fragile.
+
+The t statistic compare the mean difference with how much the differences change between directors. Here the standard deviation is 0,58, so a difference of 0,025 can be just chance, and under around 2 we can't say the difference is real.
+
+The three settings check that the result don't depend of one threshold. The two first give the same result. The third one (two films already made together) give a difference a little bit negative and significant, but it don't measure exactly the same thing, because its "new cast" group have films with actors already seen one time. And when we test many settings, it's more probable to find one significant only by chance, so we have to be careful.
 
 #### Alternatives considered and trade-offs
 
-<!-- Jade -->
+We could count all the collaborations (past and future), it's more simple but we have the selection bias explained before. We could compare the directors between them, we use more films but we measure mostly their talent. A regression with the year and the genre of each film would be more precise, because old films have often better ratings on IMDb, but it's more heavy to do and to explain. Adam propose to add it with his option --adjust-year, that compare each rating with the average of its year. We could also study other duos, for example director and scenarist.
+
+About the limits, title_principals have only the principal roles, so a loyal actor in a small role is not seen. The anteriority is by year, so two films released the same year don't count one for the other. The threshold of 1 000 votes favor the known films. And no effect in average don't mean that no director profit from it: some like Ford (+0,56) or Curtiz (+0,33) do clearly better with their regulars, and others like Corman (-0,38) do worse.
